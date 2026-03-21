@@ -23,16 +23,19 @@ export default function Admin() {
   const [filterType, setFilterType] = useState<"all" | "image" | "video">("all")
   const [loading, setLoading] = useState(false)
 
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [uploadTitle, setUploadTitle] = useState("")
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [selected, setSelected] = useState<string[]>([])
 
   const [editItem, setEditItem] = useState<MediaItem | null>(null)
   const [editTitle, setEditTitle] = useState("")
   const [deleteConfirm, setDeleteConfirm] = useState<MediaItem | null>(null)
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [editFile, setEditFile] = useState<File | null>(null)
   const [notification, setNotification] = useState<{ type: "success" | "error"; msg: string } | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
@@ -74,52 +77,127 @@ export default function Admin() {
     setLoading(false)
   }
 
+  // ✅ FIX: toggleSelect properly implemented
+  const toggleSelect = (id: string) => {
+    setSelected(prev =>
+      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
+    )
+  }
+
+  // ✅ Select All / Deselect All
+  const toggleSelectAll = () => {
+    if (selected.length === filtered.length) {
+      setSelected([])
+    } else {
+      setSelected(filtered.map(i => i.id))
+    }
+  }
+
   const uploadMedia = async () => {
-    if (!uploadFile || !uploadTitle.trim()) return notify("error", "Title and file are required")
-    setUploading(true); setUploadProgress(20)
-    const path = `public/${Date.now()}-${uploadFile.name}`
-    const { data, error } = await supabase.storage.from("gallery").upload(path, uploadFile)
-    if (error) { notify("error", "Upload failed: " + error.message); setUploading(false); return }
-    setUploadProgress(70)
-    const { data: urlData } = supabase.storage.from("gallery").getPublicUrl(data.path)
-    const table = uploadFile.type.includes("video") ? "videos" : "images"
-    await supabase.from(table).insert({ title: uploadTitle, file_url: urlData.publicUrl })
-    setUploadProgress(100)
-    setTimeout(() => setUploadProgress(0), 800)
-    setUploadFile(null); setUploadTitle(""); setUploading(false)
-    notify("success", "Media uploaded successfully!")
+    if (!uploadFiles.length) return alert("Fayl seçin")
+    setUploading(true)
+    setUploadProgress(0)
+
+    for (let idx = 0; idx < uploadFiles.length; idx++) {
+      const file = uploadFiles[idx]
+      const path = `public/${Date.now()}-${file.name}`
+
+      const { data, error } = await supabase.storage
+        .from("gallery")
+        .upload(path, file)
+
+      if (error) {
+        console.log("upload error", error)
+        continue
+      }
+
+      const { data: url } = supabase.storage
+        .from("gallery")
+        .getPublicUrl(data.path)
+
+      const table = file.type.includes("video") ? "videos" : "images"
+
+      await supabase.from(table).insert({
+        title: uploadTitle || file.name,
+        file_url: url.publicUrl,
+      })
+
+      setUploadProgress(Math.round(((idx + 1) / uploadFiles.length) * 100))
+    }
+
+    setUploadFiles([])
+    setUploadTitle("")
+    setUploading(false)
+    setUploadProgress(0)
     loadData()
+    notify("success", "Media uğurla yükləndi!")
   }
 
   const deleteItem = async (item: MediaItem) => {
     try {
-      // Extract storage path: everything after "/gallery/"
-      // URL format: https://xxx.supabase.co/storage/v1/object/public/gallery/public/timestamp-filename.jpg
-      console.log("[DELETE] file_url:", item.file_url)
       const marker = "/object/public/gallery/"
       const markerIndex = item.file_url.indexOf(marker)
 
       if (markerIndex !== -1) {
-        // e.g. "public/1234567890-photo.jpg"
         const storagePath = decodeURIComponent(item.file_url.slice(markerIndex + marker.length))
         const { error: storageError } = await supabase.storage.from("gallery").remove([storagePath])
         if (storageError) {
           console.warn("Storage delete warning:", storageError.message)
-          // Don't block DB delete even if storage fails
         }
       }
 
-      // Delete from DB
       const { error: dbError } = await supabase.from(item.table).delete().eq("id", item.id)
       if (dbError) { notify("error", dbError.message); return }
 
-      // Remove from local state
       setItems(prev => prev.filter(i => i.id !== item.id))
       setDeleteConfirm(null)
-      notify("success", "Item deleted from archive & storage")
+      notify("success", "Item silindi!")
     } catch (err: any) {
-      notify("error", "Delete failed: " + err.message)
+      notify("error", "Silmə xətası: " + err.message)
     }
+  }
+
+  const deleteSelected = async () => {
+    if (!selected.length) return
+
+    for (const id of selected) {
+      const item = items.find(i => i.id === id)
+      if (!item) continue
+
+      const marker = "/object/public/gallery/"
+      const index = item.file_url.indexOf(marker)
+
+      if (index !== -1) {
+        const path = decodeURIComponent(item.file_url.slice(index + marker.length))
+        await supabase.storage.from("gallery").remove([path])
+      }
+
+      await supabase.from(item.table).delete().eq("id", item.id)
+    }
+
+    setSelected([])
+    setBulkDeleteConfirm(false)
+    loadData()
+    notify("success", `${selected.length} item silindi!`)
+  }
+
+  const bulkEdit = async () => {
+    const newTitle = prompt("Yeni title yaz")
+    if (!newTitle) return
+
+    for (const id of selected) {
+      const item = items.find(i => i.id === id)
+      if (!item) continue
+
+      await supabase
+        .from(item.table)
+        .update({ title: newTitle })
+        .eq("id", item.id)
+    }
+
+    setSelected([])
+    loadData()
+    notify("success", `${selected.length} item yeniləndi!`)
   }
 
   const saveEdit = async () => {
@@ -128,11 +206,9 @@ export default function Admin() {
     try {
       let newUrl = editItem.file_url
 
-      // 🔥 Əgər yeni file seçilibsə
       if (editFile) {
         const newPath = `public/${Date.now()}-${editFile.name}`
 
-        // 1. upload new file
         const { data, error } = await supabase.storage
           .from("gallery")
           .upload(newPath, editFile)
@@ -148,46 +224,37 @@ export default function Admin() {
 
         newUrl = urlData.publicUrl
 
-        // 2. köhnə file sil
         const marker = "/object/public/gallery/"
         const index = editItem.file_url.indexOf(marker)
 
         if (index !== -1) {
-          const oldPath = decodeURIComponent(
-            editItem.file_url.slice(index + marker.length)
-          )
-
+          const oldPath = decodeURIComponent(editItem.file_url.slice(index + marker.length))
           await supabase.storage.from("gallery").remove([oldPath])
         }
       }
 
-      // 3. DB update
       await supabase
         .from(editItem.table)
-        .update({
-          title: editTitle,
-          file_url: newUrl,
-        })
+        .update({ title: editTitle, file_url: newUrl })
         .eq("id", editItem.id)
 
-      // 4. LOCAL update
       setItems(prev =>
         prev.map(i =>
-          i.id === editItem.id
-            ? { ...i, title: editTitle, file_url: newUrl }
-            : i
+          i.id === editItem.id ? { ...i, title: editTitle, file_url: newUrl } : i
         )
       )
 
       setEditItem(null)
       setEditFile(null)
-
-      notify("success", "Updated successfully!")
+      notify("success", "Uğurla yeniləndi!")
 
     } catch (err: any) {
       notify("error", err.message)
     }
   }
+
+  const allSelected = filtered.length > 0 && selected.length === filtered.length
+  const someSelected = selected.length > 0 && selected.length < filtered.length
 
   // ── LOGIN ──
   if (!session) return (
@@ -210,9 +277,9 @@ export default function Admin() {
           </div>
           {authError && <div className="auth-error">⚠ {authError}</div>}
           <button className="auth-btn" onClick={login} disabled={authLoading}>
-            {authLoading ? "Signing in…" : "Sign In →"}
+            {authLoading ? "Daxil olunur…" : "Daxil ol →"}
           </button>
-          <a href="/" className="auth-back">← Back to Gallery</a>
+          <a href="/" className="auth-back">← Qalereyaya qayıt</a>
         </div>
       </div>
     </>
@@ -229,54 +296,92 @@ export default function Admin() {
         </div>
       )}
 
+      {/* Bulk Delete Confirm Modal */}
+      {bulkDeleteConfirm && (
+        <div className="modal-bg" onClick={() => setBulkDeleteConfirm(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-icon">🗑️</div>
+            <div className="modal-title">{selected.length} item silinsin?</div>
+            <div className="modal-desc">
+              Seçilmiş <strong>{selected.length}</strong> fayl həmişəlik silinəcək. Bu əməliyyat geri alına bilməz.
+            </div>
+            <div className="modal-btns">
+              <button className="modal-btn-cancel" onClick={() => setBulkDeleteConfirm(false)}>Ləğv et</button>
+              <button className="modal-btn-delete" onClick={deleteSelected}>Bəli, Sil</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Single Delete Confirm Modal */}
       {deleteConfirm && (
         <div className="modal-bg" onClick={() => setDeleteConfirm(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-icon">🗑️</div>
-            <div className="modal-title">Delete this item?</div>
+            <div className="modal-title">Bu item silinsin?</div>
             <div className="modal-desc">
-              "<strong>{deleteConfirm.title}</strong>" will be permanently deleted. This cannot be undone.
+              "<strong>{deleteConfirm.title}</strong>" həmişəlik silinəcək. Bu əməliyyat geri alına bilməz.
             </div>
             <div className="modal-btns">
-              <button className="modal-btn-cancel" onClick={() => setDeleteConfirm(null)}>Cancel</button>
-              <button className="modal-btn-delete" onClick={() => deleteItem(deleteConfirm)}>Yes, Delete</button>
+              <button className="modal-btn-cancel" onClick={() => setDeleteConfirm(null)}>Ləğv et</button>
+              <button className="modal-btn-delete" onClick={() => deleteItem(deleteConfirm)}>Bəli, Sil</button>
             </div>
           </div>
         </div>
       )}
 
+      {/* Edit Modal */}
       {editItem && (
-        <div className="modal-bg" onClick={() => setEditItem(null)}>
+        <div className="modal-bg" onClick={() => { setEditItem(null); setEditFile(null) }}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-icon">✏️</div>
-            <div className="modal-title">Edit Title</div>
+            <div className="modal-title">Redaktə et</div>
             <input type="text" className="auth-input" value={editTitle}
               onChange={e => setEditTitle(e.target.value)}
               onKeyDown={e => e.key === "Enter" && saveEdit()} autoFocus />
-            <input
-              type="file"
-              accept="image/*,video/*"
-              onChange={(e) => setEditFile(e.target.files?.[0] || null)}
-              style={{ marginTop: 10 }}
-            />
+            <div className="edit-file-label">
+              <label className="file-pick-btn" style={{ marginTop: 10, justifyContent: "center" }}>
+                <input
+                  type="file"
+                  accept="image/*,video/*"
+                  onChange={(e) => setEditFile(e.target.files?.[0] || null)}
+                  style={{ display: "none" }}
+                />
+                {editFile ? `✓ ${editFile.name}` : "📎 Yeni fayl seç (optional)"}
+              </label>
+            </div>
             <div className="modal-btns" style={{ marginTop: 16 }}>
-              <button className="modal-btn-cancel" onClick={() => setEditItem(null)}>Cancel</button>
-              <button className="modal-btn-save" onClick={saveEdit}>Save</button>
+              <button className="modal-btn-cancel" onClick={() => { setEditItem(null); setEditFile(null) }}>Ləğv et</button>
+              <button className="modal-btn-save" onClick={saveEdit}>Saxla</button>
             </div>
           </div>
         </div>
       )}
 
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      )}
+
       <div className="admin-layout">
+        {/* Mobile header */}
+        <div className="mobile-header">
+          <button className="hamburger" onClick={() => setSidebarOpen(!sidebarOpen)}>
+            <span /><span /><span />
+          </button>
+          <div className="mobile-logo">Arch<span>ive</span></div>
+        </div>
+
         {/* SIDEBAR */}
-        <aside className="sidebar">
+        <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
+          <div className="sb-close" onClick={() => setSidebarOpen(false)}>✕</div>
           <div className="sb-logo">Arch<span>ive</span></div>
           <div className="sb-role">Admin Panel</div>
           <div className="sb-divider" />
 
           <nav className="sb-nav">
             <div className="sb-nav-item active">📂 Media Library</div>
-            <a href="/" className="sb-nav-item">🖼 View Gallery</a>
+            <a href="/" className="sb-nav-item" onClick={() => setSidebarOpen(false)}>🖼 View Gallery</a>
           </nav>
 
           <div className="sb-stats">
@@ -303,20 +408,37 @@ export default function Admin() {
           {/* Upload card */}
           <div className="upload-card">
             <div className="upload-card-header">
-              <div className="upload-card-title">📤 Add New Media</div>
-              <div className="upload-card-sub">Upload photos or videos to your archive</div>
+              <div className="upload-card-title">📤 Yeni Media Əlavə et</div>
+              <div className="upload-card-sub">Foto və ya video yükləyin</div>
             </div>
             <div className="upload-row">
-              <input type="text" className="upload-title-input" placeholder="Enter a title for this media…"
-                value={uploadTitle} onChange={e => setUploadTitle(e.target.value)} />
+              <input
+                type="text"
+                className="upload-title-input"
+                placeholder="Bu media üçün başlıq daxil edin…"
+                value={uploadTitle}
+                onChange={e => setUploadTitle(e.target.value)}
+              />
+
               <label className="file-pick-btn">
-                <input type="file" accept="image/*,video/*"
-                  onChange={e => setUploadFile(e.target.files?.[0] || null)} style={{ display: "none" }} />
-                {uploadFile ? `✓ ${uploadFile.name.slice(0, 22)}…` : "📎 Choose File"}
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,video/*"
+                  onChange={(e) => setUploadFiles(Array.from(e.target.files || []))}
+                  style={{ display: "none" }}
+                />
+                {uploadFiles.length > 0
+                  ? `✓ ${uploadFiles.length} fayl seçildi`
+                  : "📎 Fayl Seç"}
               </label>
-              <button className="upload-go-btn" onClick={uploadMedia}
-                disabled={uploading || !uploadFile || !uploadTitle.trim()}>
-                {uploading ? "Uploading…" : "Upload →"}
+
+              <button
+                className="upload-go-btn"
+                onClick={uploadMedia}
+                disabled={uploading || uploadFiles.length === 0}
+              >
+                {uploading ? `Yüklənir… ${uploadProgress}%` : "Yüklə →"}
               </button>
             </div>
             {uploading && (
@@ -330,59 +452,106 @@ export default function Admin() {
           <div className="lib-controls">
             <div className="lib-search-wrap">
               <span className="lib-search-icon">🔍</span>
-              <input type="text" className="lib-search" placeholder="Search media…"
+              <input type="text" className="lib-search" placeholder="Media axtar…"
                 value={search} onChange={e => setSearch(e.target.value)} />
             </div>
             <div className="lib-filters">
               {(["all", "image", "video"] as const).map(f => (
                 <button key={f} className={`lib-filter ${filterType === f ? "active" : ""}`}
                   onClick={() => setFilterType(f)}>
-                  {f === "all" ? "All" : f === "image" ? "Photos" : "Videos"}
+                  {f === "all" ? "Hamısı" : f === "image" ? "Fotolar" : "Videolar"}
                 </button>
               ))}
             </div>
-            <span className="lib-count">{filtered.length} items</span>
+            <span className="lib-count">{filtered.length} item</span>
           </div>
+
+          {/* Bulk action bar */}
+          {filtered.length > 0 && (
+            <div className="bulk-bar">
+              <label className="select-all-wrap">
+                <div
+                  className={`custom-checkbox ${allSelected ? "checked" : someSelected ? "indeterminate" : ""}`}
+                  onClick={toggleSelectAll}
+                >
+                  {allSelected && <span>✓</span>}
+                  {someSelected && <span>−</span>}
+                </div>
+                <span className="select-all-label">
+                  {allSelected ? "Hamısının seçimi ləğv et" : "Hamısını seç"}
+                </span>
+              </label>
+
+              {selected.length > 0 && (
+                <div className="bulk-actions">
+                  <span className="bulk-count">{selected.length} seçildi</span>
+                  <button className="bulk-btn bulk-edit-btn" onClick={bulkEdit}>
+                    ✏ Redaktə et ({selected.length})
+                  </button>
+                  <button className="bulk-btn bulk-delete-btn" onClick={() => setBulkDeleteConfirm(true)}>
+                    🗑 Sil ({selected.length})
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Grid */}
           {loading ? (
             <div className="admin-loading">
-              <div className="spinner" /><div className="loading-txt">Loading media…</div>
+              <div className="spinner" /><div className="loading-txt">Media yüklənir…</div>
             </div>
           ) : filtered.length === 0 ? (
             <div className="lib-empty">
               <div style={{ fontSize: 40 }}>📭</div>
-              <div className="lib-empty-title">No media found</div>
-              <div className="lib-empty-sub">Try adjusting your search</div>
+              <div className="lib-empty-title">Media tapılmadı</div>
+              <div className="lib-empty-sub">Axtarışı dəyişdirin</div>
             </div>
           ) : (
             <div className="admin-grid">
               {filtered.map((item, i) => {
                 const isVideo = item.type === "video" || !!item.file_url.match(/\.(mp4|webm|mov)/i)
+                const isSelected = selected.includes(item.id)
+
                 return (
-                  <div key={item.id} className="admin-card" style={{ animationDelay: `${(i % 12) * 40}ms` }}>
-                    <div className="admin-card-thumb">
+                  <div
+                    key={item.id}
+                    className={`admin-card ${isSelected ? "admin-card-selected" : ""}`}
+                    style={{ animationDelay: `${(i % 12) * 40}ms` }}
+                  >
+                    <div className="admin-card-thumb" onClick={() => toggleSelect(item.id)}>
+                      {/* ✅ FIX: Custom checkbox that works */}
+                      <div
+                        className={`card-checkbox ${isSelected ? "card-checkbox-checked" : ""}`}
+                        onClick={(e) => { e.stopPropagation(); toggleSelect(item.id) }}
+                      >
+                        {isSelected && <span>✓</span>}
+                      </div>
+
                       {isVideo ? (
                         <video src={item.file_url} className="admin-thumb-media" muted playsInline preload="metadata" />
                       ) : (
                         <img src={item.file_url} className="admin-thumb-media" alt={item.title} loading="lazy" />
                       )}
+
+                      {isSelected && <div className="card-selected-overlay" />}
+
                       <span className={`admin-type-tag ${isVideo ? "video" : "photo"}`}>
-                        {isVideo ? "🎬 Video" : "📷 Photo"}
+                        {isVideo ? "🎬 Video" : "📷 Foto"}
                       </span>
                     </div>
                     <div className="admin-card-body">
-                      <div className="admin-card-title">{item.title || "Untitled"}</div>
+                      <div className="admin-card-title">{item.title || "Başlıqsız"}</div>
                       <div className="admin-card-date">
-                        {new Date(item.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                        {new Date(item.created_at).toLocaleDateString("az-AZ", { day: "2-digit", month: "short", year: "numeric" })}
                       </div>
                     </div>
                     <div className="admin-card-actions">
                       <button className="admin-action-edit" onClick={() => { setEditItem(item); setEditTitle(item.title) }}>
-                        ✏ Edit
+                        ✏ Redaktə
                       </button>
                       <button className="admin-action-delete" onClick={() => setDeleteConfirm(item)}>
-                        🗑 Delete
+                        🗑 Sil
                       </button>
                     </div>
                   </div>
@@ -416,9 +585,10 @@ const styles = `
   .auth-page {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(135deg, #f5f0e8 0%, #faf6ec 100%);
+    padding: 20px;
   }
   .auth-card {
-    width: 400px; background: #fff;
+    width: 100%; max-width: 400px; background: #fff;
     border-radius: 16px; padding: 48px;
     box-shadow: 0 8px 40px rgba(0,0,0,0.1);
     border: 1px solid rgba(184,134,11,0.12);
@@ -464,6 +634,39 @@ const styles = `
   }
   .auth-back:hover { color: #b8860b; }
 
+  /* MOBILE HEADER */
+  .mobile-header {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+    background: #1a1410;
+    padding: 14px 20px;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  }
+  .mobile-logo {
+    font-family: 'Playfair Display', serif;
+    font-size: 20px; font-weight: 700; color: #f0e4c0;
+  }
+  .mobile-logo span { color: #c8a84c; font-style: italic; }
+  .hamburger {
+    display: flex; flex-direction: column; gap: 5px;
+    background: none; border: none; cursor: pointer; padding: 4px;
+  }
+  .hamburger span {
+    display: block; width: 22px; height: 2px;
+    background: #c8a84c; border-radius: 2px;
+    transition: all 0.2s;
+  }
+
+  /* SIDEBAR OVERLAY (mobile) */
+  .sidebar-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 299;
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(2px);
+  }
+
   /* LAYOUT */
   .admin-layout { display: flex; min-height: 100vh; }
 
@@ -473,7 +676,16 @@ const styles = `
     padding: 32px 20px;
     display: flex; flex-direction: column;
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    transition: transform 0.3s ease;
+    z-index: 300;
   }
+  .sb-close {
+    display: none;
+    position: absolute; top: 16px; right: 16px;
+    color: #6a5a40; font-size: 18px; cursor: pointer;
+    padding: 4px 8px;
+  }
+  .sb-close:hover { color: #c8a84c; }
   .sb-logo {
     font-family: 'Playfair Display', serif;
     font-size: 22px; font-weight: 700; color: #f0e4c0; margin-bottom: 4px;
@@ -528,7 +740,7 @@ const styles = `
   .upload-card-sub { font-size: 13px; color: #8a7a60; }
   .upload-row { display: flex; gap: 12px; flex-wrap: wrap; }
   .upload-title-input {
-    flex: 1; min-width: 200px;
+    flex: 1; min-width: 160px;
     background: #faf7f2; border: 1.5px solid #e8dfc8;
     color: #1a1410; font-family: 'Inter', sans-serif;
     font-size: 13px; padding: 10px 14px; border-radius: 8px; outline: none;
@@ -562,9 +774,9 @@ const styles = `
 
   /* CONTROLS */
   .lib-controls {
-    display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
   }
-  .lib-search-wrap { position: relative; flex: 1; max-width: 300px; }
+  .lib-search-wrap { position: relative; flex: 1; min-width: 160px; max-width: 300px; }
   .lib-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; }
   .lib-search {
     width: 100%; background: #fff; border: 1.5px solid #e8dfc8;
@@ -574,7 +786,7 @@ const styles = `
   }
   .lib-search:focus { border-color: #b8860b; box-shadow: 0 0 0 3px rgba(184,134,11,0.1); }
   .lib-search::placeholder { color: #b0a080; }
-  .lib-filters { display: flex; gap: 6px; }
+  .lib-filters { display: flex; gap: 6px; flex-wrap: wrap; }
   .lib-filter {
     font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500;
     padding: 8px 16px; border-radius: 20px;
@@ -587,35 +799,119 @@ const styles = `
     border-color: transparent; color: #fff;
     box-shadow: 0 2px 8px rgba(184,134,11,0.3);
   }
-  .lib-count { margin-left: auto; font-size: 13px; color: #8a7a60; font-weight: 500; }
+  .lib-count { margin-left: auto; font-size: 13px; color: #8a7a60; font-weight: 500; white-space: nowrap; }
+
+  /* BULK ACTION BAR */
+  .bulk-bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: #fff; border: 1.5px solid #e8dfc8;
+    border-radius: 10px; padding: 10px 16px;
+    margin-bottom: 16px;
+  }
+  .select-all-wrap {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+  }
+  .select-all-label { font-size: 13px; color: #5a4e3a; font-weight: 500; user-select: none; }
+
+  /* Custom checkbox */
+  .custom-checkbox {
+    width: 20px; height: 20px; border-radius: 5px;
+    border: 2px solid #c8b890; background: #faf7f2;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.15s; flex-shrink: 0;
+    font-size: 12px; font-weight: 700; color: #fff;
+  }
+  .custom-checkbox.checked {
+    background: linear-gradient(135deg, #b8860b, #d4a017);
+    border-color: #b8860b; color: #fff;
+  }
+  .custom-checkbox.indeterminate {
+    background: rgba(184,134,11,0.2);
+    border-color: #b8860b; color: #b8860b;
+  }
+
+  .bulk-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .bulk-count {
+    font-size: 13px; color: #8a7a60; font-weight: 500;
+    padding: 6px 10px; background: #f5f0e8; border-radius: 6px;
+  }
+  .bulk-btn {
+    font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600;
+    padding: 8px 14px; border: none; border-radius: 8px;
+    cursor: pointer; transition: all 0.2s; white-space: nowrap;
+  }
+  .bulk-edit-btn {
+    background: #2563eb; color: #fff;
+    box-shadow: 0 2px 8px rgba(37,99,235,0.25);
+  }
+  .bulk-edit-btn:hover { background: #1d4ed8; transform: translateY(-1px); }
+  .bulk-delete-btn {
+    background: #dc2626; color: #fff;
+    box-shadow: 0 2px 8px rgba(220,38,38,0.25);
+  }
+  .bulk-delete-btn:hover { background: #b91c1c; transform: translateY(-1px); }
 
   /* GRID */
   .admin-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     gap: 16px;
   }
   .admin-card {
     background: #fff; border-radius: 12px; overflow: hidden;
-    border: 1px solid rgba(184,134,11,0.1);
+    border: 1.5px solid rgba(184,134,11,0.1);
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     opacity: 0; animation: cardIn 0.4s ease forwards;
-    transition: box-shadow 0.2s, transform 0.2s;
+    transition: box-shadow 0.2s, transform 0.2s, border-color 0.2s;
+    cursor: pointer;
   }
   .admin-card:hover { box-shadow: 0 8px 28px rgba(0,0,0,0.12); transform: translateY(-2px); }
+  .admin-card-selected {
+    border-color: #b8860b !important;
+    box-shadow: 0 0 0 3px rgba(184,134,11,0.2), 0 4px 16px rgba(0,0,0,0.1) !important;
+  }
   @keyframes cardIn {
     from { opacity: 0; transform: translateY(12px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  .admin-card-thumb { position: relative; aspect-ratio: 16/10; overflow: hidden; background: #f0e8d4; }
+  .admin-card-thumb {
+    position: relative; aspect-ratio: 16/10; overflow: hidden;
+    background: #f0e8d4; cursor: pointer;
+  }
   .admin-thumb-media { width: 100%; height: 100%; object-fit: cover; display: block; }
   .admin-type-tag {
     position: absolute; top: 8px; left: 8px;
     font-size: 10px; font-weight: 600;
     padding: 4px 8px; border-radius: 5px;
+    pointer-events: none;
   }
   .admin-type-tag.photo { background: rgba(245,240,232,0.92); color: #5a4020; border: 1px solid rgba(184,134,11,0.2); }
   .admin-type-tag.video { background: rgba(30,58,138,0.85); color: #bfdbfe; border: 1px solid rgba(59,130,246,0.3); }
+
+  /* ✅ Card checkbox - top right */
+  .card-checkbox {
+    position: absolute; top: 8px; right: 8px; z-index: 10;
+    width: 22px; height: 22px; border-radius: 6px;
+    border: 2px solid rgba(255,255,255,0.9);
+    background: rgba(255,255,255,0.2);
+    backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.15s;
+    font-size: 12px; font-weight: 700; color: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .card-checkbox:hover { background: rgba(255,255,255,0.4); }
+  .card-checkbox-checked {
+    background: linear-gradient(135deg, #b8860b, #d4a017) !important;
+    border-color: #b8860b !important;
+  }
+
+  /* Selected overlay */
+  .card-selected-overlay {
+    position: absolute; inset: 0;
+    background: rgba(184,134,11,0.12);
+    pointer-events: none;
+  }
 
   .admin-card-body { padding: 12px 14px 8px; }
   .admin-card-title { font-size: 13px; font-weight: 500; color: #1a1410; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -637,17 +933,19 @@ const styles = `
     position: fixed; inset: 0; background: rgba(0,0,0,0.45);
     z-index: 500; display: flex; align-items: center; justify-content: center;
     backdrop-filter: blur(4px); animation: fadeIn 0.2s ease;
+    padding: 20px;
   }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   .modal {
     background: #fff; border-radius: 16px; padding: 36px;
-    width: 420px; max-width: 90vw; text-align: center;
+    width: 100%; max-width: 420px; text-align: center;
     box-shadow: 0 20px 60px rgba(0,0,0,0.2);
     border: 1px solid rgba(184,134,11,0.1);
   }
   .modal-icon { font-size: 36px; margin-bottom: 12px; }
   .modal-title { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 600; color: #1a1410; margin-bottom: 10px; }
   .modal-desc { font-size: 14px; color: #6a5a40; line-height: 1.6; margin-bottom: 4px; }
+  .edit-file-label { width: 100%; }
   .modal-btns { display: flex; gap: 10px; margin-top: 24px; }
   .modal-btn-cancel {
     flex: 1; padding: 11px; background: #f5f0e8; border: 1.5px solid #e0d8c4;
@@ -678,6 +976,7 @@ const styles = `
     animation: toastIn 0.3s ease;
     box-shadow: 0 8px 24px rgba(0,0,0,0.15);
     display: flex; align-items: center; gap: 8px;
+    max-width: calc(100vw - 48px);
   }
   @keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
   .toast-success { background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; }
@@ -697,4 +996,60 @@ const styles = `
   .lib-empty { text-align: center; padding: 80px 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .lib-empty-title { font-family: 'Playfair Display', serif; font-size: 24px; font-weight: 600; color: #3a2e1a; }
   .lib-empty-sub { font-size: 14px; color: #8a7a60; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 768px) {
+    .mobile-header { display: flex; }
+    .sidebar-overlay { display: block; }
+
+    .sidebar {
+      position: fixed;
+      left: 0; top: 0; bottom: 0;
+      transform: translateX(-100%);
+      width: 260px;
+    }
+    .sidebar.sidebar-open {
+      transform: translateX(0);
+      box-shadow: 4px 0 32px rgba(0,0,0,0.4);
+    }
+    .sb-close { display: block; }
+
+    .admin-main {
+      padding: 80px 16px 24px;
+    }
+
+    .upload-card { padding: 20px 16px; }
+    .upload-row { flex-direction: column; }
+    .upload-title-input { min-width: unset; width: 100%; }
+    .file-pick-btn { justify-content: center; }
+    .upload-go-btn { width: 100%; }
+
+    .lib-controls { gap: 8px; }
+    .lib-search-wrap { max-width: 100%; width: 100%; }
+    .lib-filters { gap: 4px; }
+    .lib-filter { padding: 7px 12px; font-size: 11px; }
+
+    .bulk-bar { gap: 8px; }
+    .bulk-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+
+    .admin-grid {
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 12px;
+    }
+
+    .toast { top: 72px; right: 12px; left: 12px; max-width: unset; }
+
+    .modal { padding: 24px 20px; }
+    .modal-title { font-size: 18px; }
+  }
+
+  @media (max-width: 480px) {
+    .admin-grid {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .lib-filters { width: 100%; }
+    .lib-filter { flex: 1; text-align: center; }
+    .lib-count { display: none; }
+  }
 `
