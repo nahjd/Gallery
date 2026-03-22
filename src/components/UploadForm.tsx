@@ -8,25 +8,31 @@ export default function UploadForm({ onUpload }: any) {
     const upload = async () => {
         if (!file) return
 
-        const path = `public/${Date.now()}-${file.name}`
+        const formData = new FormData()
+        formData.append("file", file)
+        formData.append("upload_preset", import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET)
 
-        const { data, error } = await supabase.storage
-            .from("gallery")
-            .upload(path, file)
+        const res = await fetch(
+            `https://api.cloudinary.com/v1_1/${import.meta.env.VITE_CLOUDINARY_CLOUD_NAME}/auto/upload`,
+            {
+                method: "POST",
+                body: formData,
+            }
+        )
 
-        if (error) return alert("error")
+        const data = await res.json()
 
-        const { data: url } = supabase.storage
-            .from("gallery")
-            .getPublicUrl(data.path)
+        if (!data.secure_url) {
+            alert("Upload error")
+            return
+        }
 
         const isVideo = file.type.includes("video")
-
         const table = isVideo ? "videos" : "images"
 
         await supabase.from(table).insert({
             title,
-            file_url: url.publicUrl,
+            file_url: data.secure_url,
         })
 
         setFile(null)
@@ -43,7 +49,10 @@ export default function UploadForm({ onUpload }: any) {
                 onChange={(e) => setTitle(e.target.value)}
             />
 
-            <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            <input
+                type="file"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+            />
 
             <button
                 onClick={upload}

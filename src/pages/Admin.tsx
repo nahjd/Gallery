@@ -37,6 +37,15 @@ export default function Admin() {
   const [notification, setNotification] = useState<{ type: "success" | "error"; msg: string } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
+  const getPublicId = (url: string) => {
+    const parts = url.split('/upload/')
+    const path = parts[1]
+
+    const withoutVersion = path.replace(/^v\d+\//, '')
+
+    return withoutVersion.split('.')[0]
+  }
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
     supabase.auth.onAuthStateChange((_e, s) => setSession(s))
@@ -77,14 +86,12 @@ export default function Admin() {
     setLoading(false)
   }
 
-  // ✅ FIX: toggleSelect properly implemented
   const toggleSelect = (id: string) => {
     setSelected(prev =>
       prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
     )
   }
 
-  // ✅ Select All / Deselect All
   const toggleSelectAll = () => {
     if (selected.length === filtered.length) {
       setSelected([])
@@ -100,26 +107,32 @@ export default function Admin() {
 
     for (let idx = 0; idx < uploadFiles.length; idx++) {
       const file = uploadFiles[idx]
-      const path = `public/${Date.now()}-${file.name}`
+      const formData = new FormData()
+      formData.append("file", file)
+      formData.append("upload_preset", import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET)
 
-      const { data, error } = await supabase.storage
-        .from("gallery")
-        .upload(path, file)
+      const res = await fetch(
+        `https://api.cloudinary.com/v1_1/${import.meta.env.VITE_CLOUDINARY_CLOUD_NAME}/auto/upload`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      )
 
-      if (error) {
-        console.log("upload error", error)
+      const uploadData = await res.json()
+
+      console.log("CLOUDINARY RESPONSE:", uploadData)
+
+      if (!uploadData.url) {
+        console.log("upload error")
         continue
       }
-
-      const { data: url } = supabase.storage
-        .from("gallery")
-        .getPublicUrl(data.path)
 
       const table = file.type.includes("video") ? "videos" : "images"
 
       await supabase.from(table).insert({
         title: uploadTitle || file.name,
-        file_url: url.publicUrl,
+        file_url: uploadData.url,
       })
 
       setUploadProgress(Math.round(((idx + 1) / uploadFiles.length) * 100))
@@ -130,30 +143,29 @@ export default function Admin() {
     setUploading(false)
     setUploadProgress(0)
     loadData()
-    notify("success", "Media uğurla yükləndi!")
+    notify("success", "Cloudinary upload oldu 🚀")
   }
 
   const deleteItem = async (item: MediaItem) => {
     try {
-      const marker = "/object/public/gallery/"
-      const markerIndex = item.file_url.indexOf(marker)
+      const public_id = getPublicId(item.file_url)
 
-      if (markerIndex !== -1) {
-        const storagePath = decodeURIComponent(item.file_url.slice(markerIndex + marker.length))
-        const { error: storageError } = await supabase.storage.from("gallery").remove([storagePath])
-        if (storageError) {
-          console.warn("Storage delete warning:", storageError.message)
-        }
-      }
+      await fetch("https://ettlzsjjgfhsgkuaoybx.functions.supabase.co/delete-media", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ public_id }),
+      })
 
-      const { error: dbError } = await supabase.from(item.table).delete().eq("id", item.id)
-      if (dbError) { notify("error", dbError.message); return }
+      await supabase.from(item.table).delete().eq("id", item.id)
 
       setItems(prev => prev.filter(i => i.id !== item.id))
       setDeleteConfirm(null)
-      notify("success", "Item silindi!")
-    } catch (err: any) {
-      notify("error", "Silmə xətası: " + err.message)
+
+      notify("success", "Silindi 🚀")
+    } catch {
+      notify("error", "Delete error")
     }
   }
 
@@ -164,13 +176,15 @@ export default function Admin() {
       const item = items.find(i => i.id === id)
       if (!item) continue
 
-      const marker = "/object/public/gallery/"
-      const index = item.file_url.indexOf(marker)
+      const public_id = getPublicId(item.file_url)
 
-      if (index !== -1) {
-        const path = decodeURIComponent(item.file_url.slice(index + marker.length))
-        await supabase.storage.from("gallery").remove([path])
-      }
+      await fetch("https://ettlzsjjgfhsgkuaoybx.functions.supabase.co/delete-media", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ public_id }),
+      })
 
       await supabase.from(item.table).delete().eq("id", item.id)
     }
@@ -178,7 +192,7 @@ export default function Admin() {
     setSelected([])
     setBulkDeleteConfirm(false)
     loadData()
-    notify("success", `${selected.length} item silindi!`)
+    notify("success", "Hamısı silindi 🚀")
   }
 
   const bulkEdit = async () => {
@@ -207,30 +221,36 @@ export default function Admin() {
       let newUrl = editItem.file_url
 
       if (editFile) {
-        const newPath = `public/${Date.now()}-${editFile.name}`
+        const formData = new FormData()
+        formData.append("file", editFile)
+        formData.append("upload_preset", import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET)
 
-        const { data, error } = await supabase.storage
-          .from("gallery")
-          .upload(newPath, editFile)
+        const res = await fetch(
+          `https://api.cloudinary.com/v1_1/${import.meta.env.VITE_CLOUDINARY_CLOUD_NAME}/auto/upload`,
+          {
+            method: "POST",
+            body: formData,
+          }
+        )
 
-        if (error) {
-          notify("error", error.message)
+        const uploadData = await res.json()
+
+        if (!uploadData.secure_url) {
+          notify("error", "Upload error")
           return
         }
 
-        const { data: urlData } = supabase.storage
-          .from("gallery")
-          .getPublicUrl(data.path)
+        newUrl = uploadData.secure_url
 
-        newUrl = urlData.publicUrl
+        const public_id = getPublicId(editItem.file_url)
 
-        const marker = "/object/public/gallery/"
-        const index = editItem.file_url.indexOf(marker)
-
-        if (index !== -1) {
-          const oldPath = decodeURIComponent(editItem.file_url.slice(index + marker.length))
-          await supabase.storage.from("gallery").remove([oldPath])
-        }
+        await fetch("https://ettlzsjjgfhsgkuaoybx.functions.supabase.co/delete-media", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ public_id }),
+        })
       }
 
       await supabase
@@ -240,13 +260,15 @@ export default function Admin() {
 
       setItems(prev =>
         prev.map(i =>
-          i.id === editItem.id ? { ...i, title: editTitle, file_url: newUrl } : i
+          i.id === editItem.id
+            ? { ...i, title: editTitle, file_url: newUrl }
+            : i
         )
       )
 
       setEditItem(null)
       setEditFile(null)
-      notify("success", "Uğurla yeniləndi!")
+      notify("success", "Update oldu 🚀")
 
     } catch (err: any) {
       notify("error", err.message)
