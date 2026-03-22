@@ -46,6 +46,9 @@ export default function Admin() {
     return withoutVersion.split('.')[0]
   }
 
+  const secureUrl = (url: string) =>
+    url.replace("http://", "https://")
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
     supabase.auth.onAuthStateChange((_e, s) => setSession(s))
@@ -551,9 +554,9 @@ export default function Admin() {
                       </div>
 
                       {isVideo ? (
-                        <video src={item.file_url} className="admin-thumb-media" muted playsInline preload="metadata" />
+                        <video src={secureUrl(item.file_url)} className="admin-thumb-media" muted playsInline preload="metadata" />
                       ) : (
-                        <img src={item.file_url} className="admin-thumb-media" alt={item.title} loading="lazy" />
+                        <img src={secureUrl(item.file_url)} className="admin-thumb-media" alt={item.title} loading="lazy" />
                       )}
 
                       {isSelected && <div className="card-selected-overlay" />}
