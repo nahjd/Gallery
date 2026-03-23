@@ -85,13 +85,19 @@ export default function Gallery() {
   const isVideoFile = (item: MediaItem) =>
     !!(item.file_url.match(/\.(mp4|webm|mov|avi|mkv)/i) || item.type === "video")
 
+  // ✅ FIX: HTTP URL-ləri HTTPS-ə çevir (Mixed Content xətasının həlli)
+  const forceHttps = (url: string): string => {
+    if (!url) return url
+    return url.replace(/^http:\/\//i, "https://")
+  }
+
   const fetchData = async () => {
     setLoading(true)
     const { data: images } = await supabase.from("images").select("*").order("created_at", { ascending: false })
     const { data: videos } = await supabase.from("videos").select("*").order("created_at", { ascending: false })
     const merged: MediaItem[] = [
-      ...(images || []).map((i: any) => ({ ...i, type: "image" as const })),
-      ...(videos || []).map((v: any) => ({ ...v, type: "video" as const })),
+      ...(images || []).map((i: any) => ({ ...i, type: "image" as const, file_url: forceHttps(i.file_url) })),
+      ...(videos || []).map((v: any) => ({ ...v, type: "video" as const, file_url: forceHttps(v.file_url) })),
     ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     setItems(merged)
     setFiltered(merged)
@@ -314,19 +320,36 @@ export default function Gallery() {
             speed={400}
             mode="lg-fade"
             plugins={[lgThumbnail, lgZoom, lgAutoplay, lgFullscreen, lgShare, lgRotate]}
-            mobileSettings={{ controls: true, showCloseIcon: true, download: false }}
+            // ✅ FIX: mobil üçün düzgün parametrlər
+            mobileSettings={{
+              controls: true,
+              showCloseIcon: true,
+              download: false,
+              rotate: false,
+            }}
+            // ✅ FIX: LightGallery-nin şəkili tapmaq üçün istifadə etdiyi selector
+            selector="a.media-item"
           >
             {photoItems.map((item, i) => (
               <a
                 key={item.id}
                 className="media-item"
                 style={{ animationDelay: `${(i % 16) * 45}ms` }}
+                // ✅ FIX: həm href həm də data-src ver - mobil üçün data-src vacibdir
                 href={item.file_url}
+                data-src={item.file_url}
                 data-sub-html={item.title ? `<p class="lg-sub">${item.title}</p>` : ""}
               >
                 <div className="media-card">
                   <div className="card-thumb">
-                    <img src={item.file_url} className="card-img" alt={item.title} loading="lazy" />
+                    {/* ✅ FIX: crossOrigin əlavə et - CORS xətalarının qarşısını alır */}
+                    <img
+                      src={item.file_url}
+                      className="card-img"
+                      alt={item.title}
+                      loading="lazy"
+                      crossOrigin="anonymous"
+                    />
                     <div className="card-overlay">
                       <div className="card-overlay-info">
                         {item.title && <div className="card-overlay-title">{item.title}</div>}
